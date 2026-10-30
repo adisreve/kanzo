@@ -435,6 +435,15 @@ label.setting { cursor: pointer; }
     <textarea class="inline title-input" id="p-title" rows="1" spellcheck="false" placeholder="Task title"></textarea>
     <div class="props">
       Status <span><select class="field" id="p-status"></select></span>
+      <label for="p-approval">Approval</label> <span><select class="field" id="p-approval">
+        <option value="">—</option><option>prije</option><option>poslije</option><option>ne</option>
+      </select></span>
+      <label for="p-builder">Builder</label> <span><select class="field" id="p-builder">
+        <option value="">default</option><option>claude</option><option>codex</option>
+      </select></span>
+      <label for="p-reviewer">Reviewer</label> <span><select class="field" id="p-reviewer">
+        <option value="">default</option><option>claude</option><option>codex</option>
+      </select></span>
       Tags <span><input class="inline" id="p-tags" placeholder="Add tags, like bug, ui" autocomplete="off" spellcheck="false"></span>
       Human <span class="human-field"><label class="switch"><input type="checkbox" id="p-human" aria-label="Human task"><span></span></label><span class="hint">Agents skip it</span></span>
       Created <span id="p-created"></span>

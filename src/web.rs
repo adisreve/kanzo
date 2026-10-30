@@ -381,12 +381,31 @@ struct NewTask {
     title: String,
     #[serde(default)]
     description: String,
+    status: Option<String>,
+    builder: Option<String>,
+    reviewer: Option<String>,
+    fixer: Option<String>,
+    approval: Option<String>,
+    branch: Option<String>,
 }
 
 async fn create_task(State(home): Shared, Json(t): Json<NewTask>) -> Response {
     with_store(home, move |_, s| {
         let project = s.find_project(&t.project)?;
-        s.create_task_in(project.id, None, &t.title, &t.description)
+        s.create_task_in(
+            project.id,
+            &t.title,
+            &t.description,
+            TaskPatch {
+                status: t.status,
+                builder: t.builder,
+                reviewer: t.reviewer,
+                fixer: t.fixer,
+                approval: t.approval,
+                branch: t.branch,
+                ..Default::default()
+            },
+        )
     })
     .await
 }
@@ -433,6 +452,12 @@ struct Patch {
     project: Option<String>,
     tags: Option<String>,
     human: Option<bool>,
+    builder: Option<String>,
+    reviewer: Option<String>,
+    fixer: Option<String>,
+    approval: Option<String>,
+    stamps: Option<String>,
+    branch: Option<String>,
 }
 
 async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Patch>) -> Response {
@@ -447,6 +472,12 @@ async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Pat
                 project_id,
                 tags: p.tags,
                 human: p.human,
+                builder: p.builder,
+                reviewer: p.reviewer,
+                fixer: p.fixer,
+                approval: p.approval,
+                stamps: p.stamps,
+                branch: p.branch,
             },
         )
     })
@@ -469,6 +500,7 @@ async fn delete_task(State(home): Shared, Path(id): Path<i64>) -> Response {
 
 #[derive(Deserialize)]
 struct NewComment {
+    author: Option<String>,
     #[serde(default)]
     body: String,
     /// Files saved by `/api/images`, attached to the comment.
@@ -481,7 +513,7 @@ async fn add_comment(State(home): Shared, Path(id): Path<i64>, Json(c): Json<New
         for file in &c.images {
             image_saved(h, file)?;
         }
-        s.add_comment(id, "me", &c.body, &c.images)
+        s.add_comment(id, c.author.as_deref().unwrap_or("me"), &c.body, &c.images)
     })
     .await
 }

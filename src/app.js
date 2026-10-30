@@ -611,6 +611,11 @@ function plainText(md) {
 }
 
 function card(t, showProject) {
+  const fields = [
+    t.builder || t.reviewer ? `${t.builder || "default"} → ${t.reviewer || "default"}` : "",
+    t.fixer ? `fixer ${t.fixer}` : "", t.approval,
+    t.stamps.length ? `✓ ${t.stamps.join(", ")}` : "", t.branch,
+  ].filter(Boolean).join(" · ");
   const node = el("div", { class: "card" + (state.task === t.id ? " open" : ""), draggable: "true", "data-id": t.id,
                            onclick: () => openTask(t.id) },
     el("div", { class: "head" },
@@ -619,6 +624,7 @@ function card(t, showProject) {
       t.human ? el("span", { class: "human-mark", title: "Human task: agents skip it" }, icon("human")) : null,
       el("span", { class: "num", title: `Copy ${key(t)}`, onclick: (e) => { e.stopPropagation(); copyKey(key(t)); } },
         showProject ? el("span", { class: "dot", style: `background:${projectColor(t.project)}` }) : null, `#${t.id}`)),
+    fields ? el("div", { class: "desc mono", title: fields }, fields) : null,
     t.description ? el("div", { class: "desc" }, plainText(t.description)) : null,
     t.tags.length ? el("div", { class: "tags" }, t.tags.map((tag) => el("span", { class: "tag" }, tag))) : null);
   node.addEventListener("dragstart", (e) => {
@@ -808,6 +814,10 @@ async function refreshTask() {
   status.replaceChildren(...statuses.map((s) => el("option", { value: s }, s)));
   if (!statuses.includes(task.status)) status.append(el("option", { value: task.status }, task.status));
   status.value = task.status;
+  for (const name of ["approval", "builder", "reviewer"]) {
+    const select = $(`#p-${name}`);
+    if (document.activeElement !== select) select.value = task[name];
+  }
   $("#p-human").checked = task.human;
   $("#p-created").replaceChildren(timeEl(task.created_at));
   $("#p-updated").replaceChildren(timeEl(task.updated_at));
@@ -929,6 +939,9 @@ $("#p-desc-view").addEventListener("mousedown", (e) => { if (e.target.closest("a
 $("#p-desc-view").addEventListener("focus", editDesc);
 
 $("#p-status").addEventListener("change", (e) => patchTask({ status: e.target.value }));
+for (const name of ["approval", "builder", "reviewer"]) {
+  $(`#p-${name}`).addEventListener("change", (e) => patchTask({ [name]: e.target.value }));
+}
 $("#p-human").addEventListener("change", (e) => patchTask({ human: e.target.checked }));
 
 // ---------- images ----------

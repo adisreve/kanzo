@@ -49,6 +49,13 @@ const MIGRATIONS: &[&str] = &[
      CREATE TRIGGER images_delete AFTER DELETE ON images BEGIN UPDATE meta SET value = value + 1 WHERE key = 'changes'; END;",
     // 6: tasks for a person, which agents leave alone.
     "ALTER TABLE tasks ADD COLUMN human INTEGER NOT NULL DEFAULT 0;",
+    // 7: Overseer roles, approval, review stamps and branch.
+    "ALTER TABLE tasks ADD COLUMN builder TEXT NOT NULL DEFAULT '';
+     ALTER TABLE tasks ADD COLUMN reviewer TEXT NOT NULL DEFAULT '';
+     ALTER TABLE tasks ADD COLUMN fixer TEXT NOT NULL DEFAULT '';
+     ALTER TABLE tasks ADD COLUMN approval TEXT NOT NULL DEFAULT '';
+     ALTER TABLE tasks ADD COLUMN stamps TEXT NOT NULL DEFAULT '';
+     ALTER TABLE tasks ADD COLUMN branch TEXT NOT NULL DEFAULT '';",
 ];
 
 /// The colours a project can be given; the board maps each name to a shade.
@@ -121,6 +128,12 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
     pub comments: i64,
+    pub builder: String,
+    pub reviewer: String,
+    pub fixer: String,
+    pub approval: String,
+    pub stamps: Vec<String>,
+    pub branch: String,
 }
 
 impl Task {
@@ -160,6 +173,45 @@ pub struct TaskPatch {
     /// Comma-separated; replaces all the tags, and an empty string clears them.
     pub tags: Option<String>,
     pub human: Option<bool>,
+    pub builder: Option<String>,
+    pub reviewer: Option<String>,
+    pub fixer: Option<String>,
+    pub approval: Option<String>,
+    /// Comma-separated; replaces all stamps, and an empty string clears them.
+    pub stamps: Option<String>,
+    pub branch: Option<String>,
+}
+
+impl TaskPatch {
+    fn normalize_fields(&mut self) -> Result<()> {
+        for (field, value, allowed) in [
+            ("builder", &self.builder, &["claude", "codex"][..]),
+            ("reviewer", &self.reviewer, &["claude", "codex"][..]),
+            ("fixer", &self.fixer, &["claude", "codex"][..]),
+            ("approval", &self.approval, &["prije", "poslije", "ne"][..]),
+        ] {
+            if let Some(value) = value {
+                check_task_value(field, value, allowed)?;
+            }
+        }
+        if let Some(stamps) = &mut self.stamps {
+            let allowed = ["claude", "codex", "ti"];
+            let values: Vec<_> = stamps.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+            for value in &values {
+                check_task_value("stamp", value, &allowed)?;
+            }
+            *stamps = allowed.into_iter().filter(|s| values.contains(s)).collect::<Vec<_>>().join(",");
+        }
+        Ok(())
+    }
+}
+
+fn check_task_value(field: &str, value: &str, allowed: &[&str]) -> Result<()> {
+    if value.is_empty() || allowed.contains(&value) {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!("unknown {field} {value:?}; use one of: {} (or \"\" to clear)", allowed.join(", "))))
+    }
 }
 
 /// Default columns for boards without a columns setting.
@@ -513,7 +565,8 @@ impl Store {
     // Tasks
 
     const TASK_SELECT: &str = "SELECT t.id, p.slug, t.title, t.description, t.status, t.position,
-            t.created_at, t.updated_at, (SELECT count(*) FROM comments c WHERE c.task_id = t.id), t.tags, t.human
+            t.created_at, t.updated_at, (SELECT count(*) FROM comments c WHERE c.task_id = t.id), t.tags, t.human,
+            t.builder, t.reviewer, t.fixer, t.approval, t.stamps, t.branch
         FROM tasks t JOIN projects p ON p.id = t.project_id";
 
     fn task_row(r: &Row) -> rusqlite::Result<Task> {
@@ -529,6 +582,12 @@ impl Store {
             created_at: r.get(6)?,
             updated_at: r.get(7)?,
             comments: r.get(8)?,
+            builder: r.get(11)?,
+            reviewer: r.get(12)?,
+            fixer: r.get(13)?,
+            approval: r.get(14)?,
+            stamps: r.get::<_, String>(15)?.split(',').filter(|s| !s.is_empty()).map(String::from).collect(),
+            branch: r.get(16)?,
         })
     }
 
@@ -641,38 +700,71 @@ impl Store {
     /// Adds a task at the bottom of the first work column; a shorthand for tests.
     #[cfg(test)]
     pub fn create_task(&self, project_id: i64, title: &str, description: &str) -> Result<Task> {
-        self.create_task_in(project_id, None, title, description)
+        self.create_task_in(project_id, title, description, TaskPatch::default())
     }
 
     /// Adds a task at the bottom of `status`, the first work column when left out.
     pub fn create_task_in(
         &self,
         project_id: i64,
-        status: Option<&str>,
         title: &str,
         description: &str,
+        mut fields: TaskPatch,
     ) -> Result<Task> {
         let title = clean_title(title)?;
-        let status = status.unwrap_or(&self.columns()[0]);
+        fields.normalize_fields()?;
+        let status = fields.status.as_deref().unwrap_or(&self.columns()[0]);
         self.check_status(status)?;
         let id = self.write(|c| {
             let position = Self::end_of_column(c, status, 0)?;
             c.execute(
-                "INSERT INTO tasks (project_id, title, description, status, position) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![project_id, title, description.trim(), status, position],
+                "INSERT INTO tasks (project_id, title, description, status, position, tags, human,
+                    builder, reviewer, fixer, approval, stamps, branch)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    project_id,
+                    title,
+                    description.trim(),
+                    status,
+                    position,
+                    clean_tags(fields.tags.as_deref().unwrap_or("")).join(","),
+                    fields.human.unwrap_or(false),
+                    fields.builder.as_deref().unwrap_or(""),
+                    fields.reviewer.as_deref().unwrap_or(""),
+                    fields.fixer.as_deref().unwrap_or(""),
+                    fields.approval.as_deref().unwrap_or(""),
+                    fields.stamps.as_deref().unwrap_or(""),
+                    fields.branch.as_deref().unwrap_or("")
+                ],
             )?;
             Ok(c.last_insert_rowid())
         })?;
         self.get_task(id)
     }
 
-    pub fn update_task(&self, id: i64, patch: TaskPatch) -> Result<Task> {
+    pub fn update_task(&self, id: i64, mut patch: TaskPatch) -> Result<Task> {
+        patch.normalize_fields()?;
         let title = patch.title.as_deref().map(clean_title).transpose()?;
         if let Some(s) = &patch.status {
             self.check_status(s)?;
         }
         self.write(|c| {
             let current = self.get_task(id)?;
+            for (field, value) in [
+                ("builder", &patch.builder),
+                ("reviewer", &patch.reviewer),
+                ("fixer", &patch.fixer),
+                ("approval", &patch.approval),
+                ("stamps", &patch.stamps),
+                ("branch", &patch.branch),
+            ] {
+                if let Some(value) = value {
+                    c.execute(
+                        &format!("UPDATE tasks SET {field} = ?1, updated_at = {NOW} WHERE id = ?2"),
+                        params![value, id],
+                    )?;
+                }
+            }
             if let Some(title) = title {
                 c.execute(
                     &format!("UPDATE tasks SET title = ?1, updated_at = {NOW} WHERE id = ?2"),
@@ -1071,6 +1163,123 @@ mod tests {
     }
 
     #[test]
+    fn migration_7_adds_empty_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kanzo.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)").unwrap();
+            for sql in &MIGRATIONS[..6] {
+                c.execute_batch(sql).unwrap();
+            }
+            c.execute_batch(
+                "INSERT INTO meta VALUES ('schema_version', '6'), ('compatible', '4');
+                 INSERT INTO projects (slug, name) VALUES ('api', 'API');
+                 INSERT INTO tasks (project_id, title, status, position) VALUES (1, 'Existing task', 'todo', 1);",
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path, None).unwrap();
+        s.migrate().unwrap();
+        let t = s.get_task(1).unwrap();
+        assert_eq!(t.title, "Existing task");
+        assert!(t.builder.is_empty() && t.reviewer.is_empty() && t.fixer.is_empty());
+        assert!(t.approval.is_empty() && t.stamps.is_empty() && t.branch.is_empty());
+        assert_eq!(s.statuses(), STATUSES);
+        assert_eq!(COMPATIBLE_FROM, 4);
+        s.migrate().unwrap();
+    }
+
+    #[test]
+    fn fields_round_trip() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s
+            .create_task_in(
+                p.id,
+                "A task",
+                "",
+                TaskPatch {
+                    status: Some("review".into()),
+                    builder: Some("claude".into()),
+                    reviewer: Some("codex".into()),
+                    fixer: Some("claude".into()),
+                    approval: Some("prije".into()),
+                    branch: Some("free text ' / ✓".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!((t.status.as_str(), t.builder.as_str(), t.reviewer.as_str()), ("review", "claude", "codex"));
+        assert_eq!((t.fixer.as_str(), t.approval.as_str(), t.branch.as_str()), ("claude", "prije", "free text ' / ✓"));
+        assert!(t.stamps.is_empty());
+        let t = s
+            .update_task(
+                t.id,
+                TaskPatch {
+                    builder: Some("codex".into()),
+                    reviewer: Some("claude".into()),
+                    fixer: Some("codex".into()),
+                    approval: Some("poslije".into()),
+                    stamps: Some("ti, claude,claude".into()),
+                    branch: Some("task/1-a".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (t.builder.as_str(), t.approval.as_str(), t.stamps.clone()),
+            ("codex", "poslije", vec!["claude".to_string(), "ti".to_string()])
+        );
+        let t = reopen(&s).get_task(t.id).unwrap();
+        assert_eq!((t.reviewer.as_str(), t.fixer.as_str(), t.branch.as_str()), ("claude", "codex", "task/1-a"));
+        let t = s
+            .update_task(
+                t.id,
+                TaskPatch {
+                    builder: Some("".into()),
+                    reviewer: Some("".into()),
+                    fixer: Some("".into()),
+                    approval: Some("".into()),
+                    stamps: Some("".into()),
+                    branch: Some("".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(t.builder.is_empty() && t.reviewer.is_empty() && t.fixer.is_empty());
+        assert!(t.approval.is_empty() && t.stamps.is_empty() && t.branch.is_empty());
+    }
+
+    #[test]
+    fn bad_values_are_refused() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "Original", "").unwrap();
+        for patch in [
+            TaskPatch { builder: Some("gpt".into()), ..Default::default() },
+            TaskPatch { reviewer: Some("gpt".into()), ..Default::default() },
+            TaskPatch { fixer: Some("gpt".into()), ..Default::default() },
+            TaskPatch { approval: Some("yes".into()), ..Default::default() },
+            TaskPatch { stamps: Some("claude,gpt".into()), ..Default::default() },
+        ] {
+            let allowed = if patch.approval.is_some() { "prije, poslije, ne" } else { "claude, codex" };
+            let changes = s.changes().unwrap();
+            let e = s.update_task(t.id, TaskPatch { title: Some("Changed".into()), ..patch }).unwrap_err();
+            assert!(e.to_string().contains(allowed), "{e}");
+            assert_eq!(s.get_task(t.id).unwrap().title, "Original");
+            assert_eq!(s.changes().unwrap(), changes);
+        }
+        let changes = s.changes().unwrap();
+        let e = s
+            .create_task_in(p.id, "Invalid", "", TaskPatch { builder: Some("gpt".into()), ..Default::default() })
+            .unwrap_err();
+        assert!(e.to_string().contains("claude, codex"));
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), 1);
+        assert_eq!(s.changes().unwrap(), changes);
+    }
+
+    #[test]
     fn set_columns_changes_the_board() {
         let (_dir, s) = store();
         let columns = cols(&["todo", "radi", "ai-review", "ceka-tebe", "spreman", "produkcija"]);
@@ -1135,7 +1344,7 @@ mod tests {
         assert_eq!(reopen(&s).statuses(), columns);
         assert_eq!(s.changes().unwrap(), changes);
         assert_eq!(s.get_task(t.id).unwrap().status, "ai-review");
-        s.create_task_in(p.id, Some("ai-review"), "b", "").unwrap();
+        s.create_task_in(p.id, "b", "", TaskPatch { status: Some("ai-review".into()), ..Default::default() }).unwrap();
         let e = s.set_columns(&cols(&["todo", "radi", "done"])).unwrap_err();
         assert!(e.to_string().contains("move the 2 tasks out of ai-review first"));
     }
@@ -1453,9 +1662,13 @@ mod tests {
         let s = Store::open(&dir.path().join("kanzo.db"), None).unwrap();
         assert_eq!(s.statuses(), ["backlog", "todo", "doing", "review", "done"]);
         let api = s.create_project("api", "", None).unwrap();
-        let backlog = s.create_task_in(api.id, Some("backlog"), "later", "").unwrap();
+        let backlog = s
+            .create_task_in(api.id, "later", "", TaskPatch { status: Some("backlog".into()), ..Default::default() })
+            .unwrap();
         assert_eq!(backlog.status, "backlog");
-        assert!(s.create_task_in(api.id, Some("nope"), "x", "").is_err());
+        assert!(
+            s.create_task_in(api.id, "x", "", TaskPatch { status: Some("nope".into()), ..Default::default() }).is_err()
+        );
         assert_eq!(s.create_task(api.id, "now", "").unwrap().status, "todo");
 
         let t = s.next_task(None).unwrap().unwrap();

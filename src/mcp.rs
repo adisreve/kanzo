@@ -186,6 +186,15 @@ struct CreateTaskArgs {
     status: Option<String>,
     /// For the user, not for agents.
     human: Option<bool>,
+    /// "", claude or codex; "" uses the project default.
+    builder: Option<String>,
+    /// "", claude or codex; "" uses the project default.
+    reviewer: Option<String>,
+    /// "", claude or codex; "" uses the project default.
+    fixer: Option<String>,
+    /// "", prije, poslije or ne.
+    approval: Option<String>,
+    branch: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -202,6 +211,17 @@ struct UpdateTaskArgs {
     tags: Option<String>,
     /// For the user, not for agents.
     human: Option<bool>,
+    /// "", claude or codex; "" uses the project default.
+    builder: Option<String>,
+    /// "", claude or codex; "" uses the project default.
+    reviewer: Option<String>,
+    /// "", claude or codex; "" uses the project default.
+    fixer: Option<String>,
+    /// "", prije, poslije or ne.
+    approval: Option<String>,
+    /// Comma-separated claude, codex, ti; "" clears.
+    stamps: Option<String>,
+    branch: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -396,12 +416,25 @@ impl Kanzo {
                 let project = ctx.project(store, args.project.as_deref())?;
                 let status = args.status.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
                 let description = args.description.as_deref().unwrap_or("");
-                let mut t = store.create_task_in(project.id, status.as_deref(), &args.title, description)?;
-                if args.tags.is_some() || args.human.is_some() {
-                    t = store
-                        .update_task(t.id, TaskPatch { tags: args.tags, human: args.human, ..Default::default() })?;
-                }
-                Ok(format!("Created {} in {}: {}", t.key(), t.status, t.title))
+                let t = store.create_task_in(
+                    project.id,
+                    &args.title,
+                    description,
+                    TaskPatch {
+                        status,
+                        tags: args.tags,
+                        human: args.human,
+                        builder: args.builder,
+                        reviewer: args.reviewer,
+                        fixer: args.fixer,
+                        approval: args.approval,
+                        branch: args.branch,
+                        ..Default::default()
+                    },
+                )?;
+                let mut out = format!("Created {} in {}: {}", t.key(), t.status, t.title);
+                write_task_fields(&mut out, &t);
+                Ok(out)
             })
             .await)
     }
@@ -421,6 +454,12 @@ impl Kanzo {
                         tags: args.tags,
                         project_id: None,
                         human: args.human,
+                        builder: args.builder,
+                        reviewer: args.reviewer,
+                        fixer: args.fixer,
+                        approval: args.approval,
+                        stamps: args.stamps,
+                        branch: args.branch,
                     },
                 )?;
                 let moved = if before.status != after.status {
@@ -428,7 +467,9 @@ impl Kanzo {
                 } else {
                     String::new()
                 };
-                Ok(format!("Updated {}{moved}: {}", after.key(), after.title))
+                let mut out = format!("Updated {}{moved}: {}", after.key(), after.title);
+                write_task_fields(&mut out, &after);
+                Ok(out)
             })
             .await)
     }
@@ -506,6 +547,26 @@ fn task_line(out: &mut String, t: &Task) {
             let _ = write!(out, " ({n} comments)");
         }
     }
+    write_task_fields(out, t);
+}
+
+fn write_task_fields(out: &mut String, t: &Task) {
+    let mut fields: Vec<_> =
+        [("builder", &t.builder), ("reviewer", &t.reviewer), ("fixer", &t.fixer), ("approval", &t.approval)]
+            .into_iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(name, value)| format!("{name} {value}"))
+            .collect();
+    if !t.stamps.is_empty() {
+        fields.push(format!("stamps {}", t.stamps.join(", ")));
+    }
+    if !t.branch.is_empty() {
+        fields.push(format!("branch {}", t.branch));
+    }
+    if !fields.is_empty() {
+        out.push('\n');
+        out.push_str(&fields.join(" · "));
+    }
 }
 
 /// ` {bug, ui}`, or nothing without tags.
@@ -535,6 +596,7 @@ fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
     if updated != created {
         let _ = write!(out, ", updated {updated}");
     }
+    write_task_fields(&mut out, t);
     out.push('\n');
     if !t.description.is_empty() {
         let _ = writeln!(out, "\n{}", t.description);
