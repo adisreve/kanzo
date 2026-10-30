@@ -25,13 +25,13 @@ const DONE_LISTED: usize = 20;
 
 const INSTRUCTIONS: &str = "The user's kanban board, on this machine, for all their projects. Tasks look like \
 api#12. Without `project`, Kanzo uses the project linked to this folder's GitHub repo. Keep it current unasked: \
-doing when you start a task, comments on what you did, review when you finish or get stuck. Leave done and \
+use next_task when you start, comments on what you did, and the board's columns to report progress. Leave the last column and \
 human tasks to the user.";
 
 const HTTP_INSTRUCTIONS: &str = "The user's kanban board, on their machine, for all their projects. Tasks look \
 like api#12. Over HTTP Kanzo can't see your folder, so pass `project` (see list_projects). Keep it current \
-unasked: doing when you start a task, comments on what you did, review when you finish or get stuck. Leave \
-done and human tasks to the user.";
+unasked: use next_task when you start, comments on what you did, and the board's columns to report progress. Leave \
+the last column and human tasks to the user.";
 
 /// `kanzo mcp`: one agent on stdin and stdout, in the folder it started us in.
 pub async fn serve(home: Home) -> Result<()> {
@@ -182,7 +182,7 @@ struct CreateTaskArgs {
     project: Option<String>,
     /// Comma-separated.
     tags: Option<String>,
-    /// Column; defaults to todo.
+    /// Column; defaults to the first non-backlog column.
     status: Option<String>,
     /// For the user, not for agents.
     human: Option<bool>,
@@ -196,7 +196,7 @@ struct UpdateTaskArgs {
     title: Option<String>,
     /// Markdown.
     description: Option<String>,
-    /// Column, like review.
+    /// Column; use a status from list_tasks.
     status: Option<String>,
     /// Comma-separated; "" clears.
     tags: Option<String>,
@@ -389,7 +389,7 @@ impl Kanzo {
             .await)
     }
 
-    #[tool(description = "Add a task, to todo unless you pass status.")]
+    #[tool(description = "Add a task, to the first non-backlog column unless you pass status.")]
     async fn create_task(&self, Parameters(args): Parameters<CreateTaskArgs>) -> Result<CallToolResult, ErrorData> {
         Ok(self
             .run(move |ctx, store| {
@@ -450,7 +450,7 @@ impl Kanzo {
             .await)
     }
 
-    #[tool(description = "Take the top todo task, move it to doing and show it.")]
+    #[tool(description = "Take the top task from the first non-backlog column, move it to the second and show it.")]
     async fn next_task(&self, Parameters(args): Parameters<NextTaskArgs>) -> Result<CallToolResult, ErrorData> {
         Ok(self
             .run(move |ctx, store| {
@@ -460,7 +460,7 @@ impl Kanzo {
                     Some(task) => Ok(format!("Moved to {}:\n{}", task.status, task_detail(ctx, store, &task)?)),
                     None => {
                         let scope = project.map_or("any project".into(), |p| p.slug);
-                        Ok(format!("Nothing in todo for {scope}."))
+                        Ok(format!("Nothing in the first non-backlog column for {scope}."))
                     }
                 }
             })

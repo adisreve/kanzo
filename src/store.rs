@@ -162,11 +162,10 @@ pub struct TaskPatch {
     pub human: Option<bool>,
 }
 
-/// The board's columns, left to right. New tasks go in todo, agents take theirs from
-/// there and move them to doing, and tasks in done count as done.
+/// Default columns for boards without a columns setting.
 const STATUSES: [&str; 4] = ["todo", "doing", "review", "done"];
 
-/// An optional column before todo, for tasks that agents leave alone.
+/// An optional column before the first work column, for tasks that agents leave alone.
 pub const BACKLOG: &str = "backlog";
 
 pub struct Store {
@@ -188,11 +187,14 @@ impl Store {
         // when a board loses power.
         conn.pragma_update_and_check(None, "journal_mode", "TRUNCATE", |_| Ok(()))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        // Before the first migration there is no meta table, and so no backlog.
+        // Before the first migration there is no meta table, so use the defaults.
         let backlog = conn
             .query_row("SELECT value FROM meta WHERE key = 'backlog'", [], |r| r.get::<_, String>(0))
             .is_ok_and(|v| v == "1");
-        let statuses = backlog.then_some(BACKLOG).into_iter().chain(STATUSES).map(String::from).collect();
+        let columns = conn
+            .query_row("SELECT value FROM meta WHERE key = 'columns'", [], |r| r.get::<_, String>(0))
+            .unwrap_or_else(|_| STATUSES.join(","));
+        let statuses = backlog.then_some(BACKLOG).into_iter().chain(columns.split(',')).map(String::from).collect();
         Ok(Self { conn, statuses, _lock: lock })
     }
 
@@ -201,7 +203,46 @@ impl Store {
     }
 
     fn done_status(&self) -> &str {
-        STATUSES[3]
+        self.statuses.last().unwrap()
+    }
+
+    fn columns(&self) -> &[String] {
+        &self.statuses[usize::from(self.statuses[0] == BACKLOG)..]
+    }
+
+    /// Changes the work columns. Removed columns must be empty so no tasks disappear.
+    pub fn set_columns(&self, columns: &[String]) -> Result<()> {
+        if columns.len() < 3 {
+            return Err(Error::Invalid("use at least 3 columns".into()));
+        }
+        for (i, column) in columns.iter().enumerate() {
+            if column.is_empty() || !column.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {
+                return Err(Error::Invalid(format!("column {column:?} must use lowercase letters, digits or -")));
+            }
+            if column == BACKLOG {
+                return Err(Error::Invalid("backlog is a separate setting, not a work column".into()));
+            }
+            if columns[..i].contains(column) {
+                return Err(Error::Invalid(format!("duplicate column {column:?}")));
+            }
+        }
+        self.write(|c| {
+            let mut stmt = c.prepare("SELECT status, count(*) FROM tasks WHERE status <> ?1 GROUP BY status")?;
+            let occupied = stmt.query_map([BACKLOG], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            for row in occupied {
+                let (column, left) = row?;
+                if !columns.contains(&column) {
+                    let tasks = if left == 1 { "task" } else { "tasks" };
+                    return Err(Error::Invalid(format!("move the {left} {tasks} out of {column} first")));
+                }
+            }
+            c.execute(
+                "INSERT INTO meta (key, value) VALUES ('columns', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [columns.join(",")],
+            )?;
+            c.execute("UPDATE meta SET value = value + 1 WHERE key = 'changes'", [])?;
+            Ok(())
+        })
     }
 
     /// Shows or hides the backlog column. It must be empty to hide it, or its
@@ -597,13 +638,13 @@ impl Store {
         Ok(max.map_or(1.0, |m| m.floor() + 1.0))
     }
 
-    /// Adds a task at the bottom of todo; a shorthand for tests.
+    /// Adds a task at the bottom of the first work column; a shorthand for tests.
     #[cfg(test)]
     pub fn create_task(&self, project_id: i64, title: &str, description: &str) -> Result<Task> {
         self.create_task_in(project_id, None, title, description)
     }
 
-    /// Adds a task at the bottom of `status`, todo when left out.
+    /// Adds a task at the bottom of `status`, the first work column when left out.
     pub fn create_task_in(
         &self,
         project_id: i64,
@@ -612,7 +653,7 @@ impl Store {
         description: &str,
     ) -> Result<Task> {
         let title = clean_title(title)?;
-        let status = status.unwrap_or(STATUSES[0]);
+        let status = status.unwrap_or(&self.columns()[0]);
         self.check_status(status)?;
         let id = self.write(|c| {
             let position = Self::end_of_column(c, status, 0)?;
@@ -737,10 +778,11 @@ impl Store {
         Ok(())
     }
 
-    /// Takes the top task of todo that isn't for a person, and moves it to the bottom
-    /// of doing.
+    /// Takes the top task of the first work column that isn't for a person, and moves
+    /// it to the bottom of the second.
     pub fn next_task(&self, project_id: Option<i64>) -> Result<Option<Task>> {
-        let [from, to, ..] = STATUSES;
+        let from = &self.columns()[0];
+        let to = &self.columns()[1];
         let id = self.write(|c| {
             let id: Option<i64> = c
                 .query_row(
@@ -1018,6 +1060,106 @@ mod tests {
 
     fn titles(tasks: &[Task]) -> Vec<&str> {
         tasks.iter().map(|t| t.title.as_str()).collect()
+    }
+
+    fn cols(columns: &[&str]) -> Vec<String> {
+        columns.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn reopen(s: &Store) -> Store {
+        Store::open(Path::new(s.conn.path().unwrap()), None).unwrap()
+    }
+
+    #[test]
+    fn set_columns_changes_the_board() {
+        let (_dir, s) = store();
+        let columns = cols(&["todo", "radi", "ai-review", "ceka-tebe", "spreman", "produkcija"]);
+        let changes = s.changes().unwrap();
+        s.set_columns(&columns).unwrap();
+        assert!(s.changes().unwrap() > changes);
+        let s = reopen(&s);
+        assert_eq!(s.statuses(), columns);
+        s.set_backlog(true).unwrap();
+        let s = reopen(&s);
+        assert_eq!(s.statuses(), cols(&["backlog"]).into_iter().chain(columns).collect::<Vec<_>>());
+        s.set_backlog(false).unwrap();
+        assert_eq!(reopen(&s).statuses(), ["todo", "radi", "ai-review", "ceka-tebe", "spreman", "produkcija"]);
+    }
+
+    #[test]
+    fn new_tasks_go_to_first_column_and_next_task_to_second() {
+        let (_dir, s) = store();
+        for first in ["todo", "ready"] {
+            s.set_columns(&cols(&[first, "radi", "produkcija"])).unwrap();
+            for backlog in [false, true] {
+                s.set_backlog(backlog).unwrap();
+                let s = reopen(&s);
+                let p = s.project_by_slug("api").unwrap().unwrap_or_else(|| s.create_project("api", "", None).unwrap());
+                let t = s.create_task(p.id, "a", "").unwrap();
+                assert_eq!(t.status, first);
+                assert_eq!(s.next_task(None).unwrap().unwrap().status, "radi");
+                s.delete_task(t.id).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn done_is_the_last_column() {
+        let (_dir, s) = store();
+        s.set_columns(&cols(&["todo", "radi", "produkcija"])).unwrap();
+        let s = reopen(&s);
+        let p = s.create_project("api", "", None).unwrap();
+        s.create_task(p.id, "open", "").unwrap();
+        let t = s.create_task(p.id, "finished", "").unwrap();
+        s.move_task(t.id, "produkcija", None).unwrap();
+        assert_eq!(s.find_project("api").unwrap().open, 1);
+        assert_eq!(s.list_projects().unwrap()[0].open, 1);
+        let (tasks, hidden) = s.list_tasks_keeping_done(None, None, Some(0)).unwrap();
+        assert_eq!(titles(&tasks), ["open"]);
+        assert_eq!(hidden, 1);
+    }
+
+    #[test]
+    fn removing_a_column_with_tasks_is_refused() {
+        let (_dir, s) = store();
+        let columns = cols(&["todo", "radi", "ai-review", "ceka-tebe", "spreman", "produkcija"]);
+        s.set_columns(&columns).unwrap();
+        let s = reopen(&s);
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "a", "").unwrap();
+        s.move_task(t.id, "ai-review", None).unwrap();
+        let changes = s.changes().unwrap();
+        let e = s.set_columns(&cols(&["todo", "radi", "done"])).unwrap_err();
+        assert!(matches!(e, Error::Invalid(_)));
+        assert!(e.to_string().contains("move the 1 task out of ai-review first"));
+        assert_eq!(reopen(&s).statuses(), columns);
+        assert_eq!(s.changes().unwrap(), changes);
+        assert_eq!(s.get_task(t.id).unwrap().status, "ai-review");
+        s.create_task_in(p.id, Some("ai-review"), "b", "").unwrap();
+        let e = s.set_columns(&cols(&["todo", "radi", "done"])).unwrap_err();
+        assert!(e.to_string().contains("move the 2 tasks out of ai-review first"));
+    }
+
+    #[test]
+    fn bad_columns_are_refused() {
+        let (_dir, s) = store();
+        let changes = s.changes().unwrap();
+        for columns in [
+            vec![],
+            vec!["todo", "done"],
+            vec!["todo", "todo", "done"],
+            vec!["backlog", "todo", "done"],
+            vec!["todo", "", "done"],
+            vec!["todo", "AI-review", "done"],
+            vec!["todo", "ai_review", "done"],
+            vec!["todo", "ai review", "done"],
+            vec!["todo", "čeka", "done"],
+            vec!["todo", "ai,review", "done"],
+        ] {
+            assert!(matches!(s.set_columns(&cols(&columns)), Err(Error::Invalid(_))), "{columns:?}");
+            assert_eq!(reopen(&s).statuses(), STATUSES);
+            assert_eq!(s.changes().unwrap(), changes);
+        }
     }
 
     #[test]

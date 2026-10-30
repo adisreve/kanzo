@@ -394,11 +394,21 @@ async fn create_task(State(home): Shared, Json(t): Json<NewTask>) -> Response {
 /// Board settings, kept in kanzo.db so they sync with the board.
 #[derive(Deserialize)]
 struct Settings {
-    backlog: bool,
+    backlog: Option<bool>,
+    columns: Option<Vec<String>>,
 }
 
 async fn update_settings(State(home): Shared, Json(r): Json<Settings>) -> Response {
-    with_store(home, move |_, s| s.set_backlog(r.backlog)).await
+    with_store(home, move |_, s| {
+        if let Some(columns) = r.columns {
+            s.set_columns(&columns)?;
+        }
+        if let Some(backlog) = r.backlog {
+            s.set_backlog(backlog)?;
+        }
+        Ok(())
+    })
+    .await
 }
 
 #[derive(Serialize)]

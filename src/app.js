@@ -131,12 +131,12 @@ function projectColor(slug) {
   return PROJECT_COLORS[projectColorName(slug)];
 }
 
-// How many columns a status is past todo: -1 for backlog, and 0 for a status the board
+// How many columns a status is past the first work column: -1 for backlog, and 0 for a status the board
 // doesn't know.
 function statusStep(status) {
   const { statuses } = state.board;
   const i = statuses.indexOf(status);
-  return i < 0 ? 0 : i - statuses.indexOf("todo");
+  return i < 0 ? 0 : i - (statuses[0] === "backlog" ? 1 : 0);
 }
 
 function statusColor(status) {
@@ -145,10 +145,11 @@ function statusColor(status) {
 }
 
 // A column's status as a small progress circle, as in Linear: dashed for backlog, empty
-// for todo, filling up across the board, a check for done. A shape, so it can't be taken
+// for the first work column, filling up across the board, a check for the last. A shape, so it can't be taken
 // for a project's colour dot.
 function statusIcon(status) {
-  const step = statusStep(status), steps = statusStep("done");
+  const { statuses } = state.board;
+  const step = statusStep(status), steps = statusStep(statuses[statuses.length - 1]);
   const f = Math.max(step, 0) / steps;
   const color = statusColor(status);
   const dash = step < 0 ? ' stroke-dasharray="2.36 2.36"' : "";
@@ -521,7 +522,7 @@ function renderColumns() {
   if (state.layout !== layout) {
     state.layout = layout;
     columns.replaceChildren(...statuses.map((status) => {
-      const collapsible = status === "backlog" || status === "done";
+      const collapsible = status === "backlog" || status === statuses[statuses.length - 1];
       const col = el("section", { class: "column", "data-status": status },
         el("h2", {},
           statusIcon(status), status,
