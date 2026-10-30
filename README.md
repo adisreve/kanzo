@@ -1,3 +1,9 @@
+> **Fork.** This is a fork of [emanuele-em/kanzo](https://github.com/emanuele-em/kanzo) used as the board behind Overseer. Differences from upstream:
+>
+> - Columns are configurable: `curl -X PATCH localhost:4242/api/settings -H 'content-type: application/json' -d '{"columns":["todo","radi","ai-review","ceka-tebe","spreman","produkcija"]}'`. The first column takes new tasks, the second is where `next_task` moves them, the last counts as done. A column that still has tasks can't be removed.
+> - Tasks carry `builder`, `reviewer`, `fixer` (`claude`/`codex`), `approval` (`prije`/`poslije`/`ne`), review `stamps` (`claude`, `codex`, `ti`) and `branch`, over HTTP, MCP and on the board.
+> - Comments posted over HTTP can name their `author`.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/img/kanzo-dark.jpg">
